@@ -1,0 +1,296 @@
+#!/usr/bin/env bash
+#
+# Synapse CLI — herramientas para integrar Synapse en apps
+#
+# Uso:
+#   synapse doctor                    Health check del servidor
+#   synapse doctor --url URL          Health check con URL custom
+#   synapse init --js                 Agregar SDK JS a proyecto actual
+#   synapse init --elixir             Agregar SDK Elixir a proyecto actual
+#   synapse test --js --token JWT     Smoke test con SDK JS
+#   synapse env                       Mostrar variables de entorno necesarias
+
+set -euo pipefail
+
+SYNAPSE_URL="${SYNAPSE_URL:-http://localhost:4003}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SKILL_DIR="$(dirname "$SCRIPT_DIR")"
+
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+NC='\033[0m'
+
+usage() {
+  cat <<EOF
+Synapse CLI — ZEA Platform real-time messaging
+
+Comandos:
+  doctor               Health check a Synapse
+    --url URL          URL del servidor (default: $SYNAPSE_URL)
+
+  init                 Inicializar integración en un proyecto
+    --js               Proyecto JS/TS (React, Vite, Node)
+    --elixir           Proyecto Elixir/Phoenix
+
+  test                 Smoke test de conectividad
+    --js               Usar SDK JS
+    --elixir           Usar SDK Elixir
+    --token JWT        Token JWT de Thalamus (requerido)
+
+  env                  Mostrar variables de entorno necesarias
+  help                 Esta ayuda
+EOF
+}
+
+# ── doctor ────────────────────────────────────────────────────────────────
+
+cmd_doctor() {
+  local url="$SYNAPSE_URL"
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --url) url="$2"; shift 2 ;;
+      *) shift ;;
+    esac
+  done
+
+  echo -e "${YELLOW}🔍 Synapse health check: $url${NC}"
+
+  # 1. HTTP health
+  local http_result
+  http_result=$(curl -s -o /dev/null -w "%{http_code}" "$url/health" 2>/dev/null || echo "000")
+
+  if [[ "$http_result" == "200" ]]; then
+    local body
+    body=$(curl -s "$url/health")
+    echo -e "  ${GREEN}✅ HTTP health: 200${NC}"
+    echo "  Response: $body"
+  else
+    echo -e "  ${RED}❌ HTTP health: $http_result${NC}"
+    echo "  ¿Está corriendo Synapse? Ejecutá: cd synapse && mix phx.server"
+    return 1
+  fi
+
+  # 2. WebSocket (intento básico — solo verifica que el endpoint existe)
+  local ws_url
+  ws_url=$(echo "$url" | sed 's|http|ws|')/socket/websocket
+  local ws_result
+  ws_result=$(curl -s -o /dev/null -w "%{http_code}" -H "Upgrade: websocket" -H "Connection: Upgrade" "$ws_url" 2>/dev/null || echo "000")
+
+  if [[ "$ws_result" == "426" || "$ws_result" == "101" ]]; then
+    echo -e "  ${GREEN}✅ WebSocket endpoint responde: $ws_result${NC}"
+  else
+    echo -e "  ${YELLOW}⚠️  WebSocket check: $ws_result (esperado 101 o 426)${NC}"
+  fi
+
+  echo -e "${GREEN}🎉 Synapse está operativo.${NC}"
+}
+
+# ── init ──────────────────────────────────────────────────────────────────
+
+cmd_init() {
+  local target=""
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --js) target="js"; shift ;;
+      --elixir) target="elixir"; shift ;;
+      *) shift ;;
+    esac
+  done
+
+  if [[ -z "$target" ]]; then
+    echo -e "${RED}Error: especificá --js o --elixir${NC}"
+    return 1
+  fi
+
+  if [[ "$target" == "js" ]]; then
+    init_js
+  else
+    init_elixir
+  fi
+}
+
+init_js() {
+  local pkg_json="package.json"
+
+  if [[ ! -f "$pkg_json" ]]; then
+    echo -e "${YELLOW}No se encontró package.json. Creando proyecto base...${NC}"
+    echo "Ejecutá esto en un proyecto JS/TS existente."
+    echo ""
+    echo "Para crear la integración manualmente:"
+    echo "  npm install github:zeacl/synapse-js"
+    echo ""
+    cat "$SKILL_DIR/../../.agents/skills/synapse/SKILL.md" 2>/dev/null | grep -A 30 "Paso 2: Crear" | head -30 || true
+    return 1
+  fi
+
+  echo -e "${YELLOW}📦 Instalando @zea.cl/synapse-js...${NC}"
+
+  # Check if npm is available
+  if ! command -v npm &>/dev/null; then
+    echo -e "${RED}❌ npm no encontrado${NC}"
+    return 1
+  fi
+
+  npm install github:zeacl/synapse-js
+
+  echo ""
+  echo -e "${GREEN}✅ SDK instalado.${NC}"
+  echo ""
+  echo "Agregá esto a tu .env:"
+  echo "  VITE_SYNAPSE_URL=$SYNAPSE_URL"
+  echo ""
+  echo "Creá src/lib/synapse.ts con:"
+  echo ""
+  cat <<'TEMPLATE'
+import { SynapseClient } from '@zea.cl/synapse-js'
+
+export function createSynapseClient(jwtToken: string) {
+  return new SynapseClient({
+    token: jwtToken,
+    baseUrl: import.meta.env.VITE_SYNAPSE_URL || 'http://localhost:4003',
+  })
+}
+TEMPLATE
+}
+
+init_elixir() {
+  local mix_exs="mix.exs"
+
+  if [[ ! -f "$mix_exs" ]]; then
+    echo -e "${YELLOW}No se encontró mix.exs. Ejecutá esto en un proyecto Elixir existente.${NC}"
+    echo ""
+    echo "Para crear la integración manualmente:"
+    echo "  1. Agregá {:synapse_client, github: \"zeacl/synapse_client\"} a deps en mix.exs"
+    echo "  2. mix deps.get"
+    return 1
+  fi
+
+  echo -e "${YELLOW}📦 Verificando mix.exs...${NC}"
+
+  if ! command -v mix &>/dev/null; then
+    echo -e "${RED}❌ mix no encontrado${NC}"
+    return 1
+  fi
+
+  # Check if dependency already exists
+  if grep -q 'synapse_client' "$mix_exs"; then
+    echo -e "${GREEN}✅ synapse_client ya está en las dependencias.${NC}"
+  else
+    echo -e "${YELLOW}⚠️  Agregá manualmente a mix.exs:${NC}"
+    echo '  {:synapse_client, github: "zeacl/synapse_client"}'
+    echo ""
+    echo "Luego ejecutá: mix deps.get"
+  fi
+
+  echo ""
+  echo "Agregá a config/config.exs:"
+  echo '  config :mi_app, :synapse_url, "http://localhost:4003"'
+  echo ""
+  echo "Agregá a tu Application.start/2:"
+  echo ""
+  cat <<'TEMPLATE'
+  {SynapseClient,
+   name: MiApp.SynapseClient,
+   token: fn -> obtener_jwt() end,
+   base_url: Application.get_env(:mi_app, :synapse_url)}
+TEMPLATE
+}
+
+# ── test ──────────────────────────────────────────────────────────────────
+
+cmd_test() {
+  local target=""
+  local token=""
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --js) target="js"; shift ;;
+      --elixir) target="elixir"; shift ;;
+      --token) token="$2"; shift 2 ;;
+      *) shift ;;
+    esac
+  done
+
+  if [[ -z "$token" ]]; then
+    echo -e "${RED}Error: se requiere --token JWT${NC}"
+    echo "Obtenelo de Thalamus o usá x-test-user-id en dev."
+    return 1
+  fi
+
+  echo -e "${YELLOW}🧪 Smoke test Synapse...${NC}"
+
+  # Test REST API con JWT
+  local result
+  result=$(curl -s -w "\n%{http_code}" -H "Authorization: Bearer $token" "$SYNAPSE_URL/conversations" 2>/dev/null)
+  local http_code
+  http_code=$(echo "$result" | tail -1)
+  local body
+  body=$(echo "$result" | head -n -1)
+
+  if [[ "$http_code" == "200" ]]; then
+    echo -e "  ${GREEN}✅ GET /conversations: $http_code${NC}"
+    local count
+    count=$(echo "$body" | python3 -c "import sys,json; print(len(json.load(sys.stdin).get('data',[])))" 2>/dev/null || echo "?")
+    echo "  Conversaciones: $count"
+  elif [[ "$http_code" == "401" ]]; then
+    echo -e "  ${RED}❌ GET /conversations: 401 Unauthorized${NC}"
+    echo "  El JWT no es válido. Verificá el token contra Thalamus."
+    return 1
+  else
+    echo -e "  ${RED}❌ GET /conversations: $http_code${NC}"
+    echo "  $body"
+    return 1
+  fi
+
+  echo -e "${GREEN}🎉 Conectividad REST OK.${NC}"
+  echo ""
+  echo "Para probar WebSocket, usá el SDK desde tu app."
+}
+
+# ── env ───────────────────────────────────────────────────────────────────
+
+cmd_env() {
+  echo "Variables de entorno para apps que usan Synapse:"
+  echo ""
+  echo "  # URL del servidor Synapse"
+  echo "  export SYNAPSE_URL=http://localhost:4003"
+  echo ""
+  echo "  # En React/Vite (.env):"
+  echo "  VITE_SYNAPSE_URL=http://localhost:4003"
+  echo ""
+  echo "  # En Elixir (config.exs):"
+  echo "  config :mi_app, :synapse_url, \"http://localhost:4003\""
+  echo ""
+  echo "  # En producción:"
+  echo "  SYNAPSE_URL=https://synapse.zea.cl"
+}
+
+# ── main ──────────────────────────────────────────────────────────────────
+
+main() {
+  if [[ $# -eq 0 ]]; then
+    usage
+    exit 0
+  fi
+
+  local cmd="$1"
+  shift
+
+  case "$cmd" in
+    doctor)   cmd_doctor "$@" ;;
+    init)     cmd_init "$@" ;;
+    test)     cmd_test "$@" ;;
+    env)      cmd_env ;;
+    help|--help|-h) usage ;;
+    *)
+      echo -e "${RED}Comando desconocido: $cmd${NC}"
+      usage
+      exit 1
+      ;;
+  esac
+}
+
+main "$@"

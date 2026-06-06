@@ -42,6 +42,86 @@ mix setup          # deps.get + ecto.create + ecto.migrate + seeds
 mix phx.server     # arranca en localhost:4003
 ```
 
+## Integración en otras apps
+
+Synapse es un **servicio**. Las apps se conectan vía SDK, sin tocar este código.
+
+**Prerrequisito:** la app ya debe estar integrada con Thalamus (tener un JWT).
+
+### React / Vite / TypeScript
+
+```bash
+npm install github:zeacl/synapse-js
+```
+
+```ts
+import { SynapseClient, useConversation } from '@zea.cl/synapse-js'
+
+// Inicializar (el token lo obtienen de Thalamus, ya lo tienen)
+const synapse = new SynapseClient({
+  token: jwtFromThalamus,
+  baseUrl: import.meta.env.VITE_SYNAPSE_URL || 'http://localhost:4003',
+})
+
+// REST
+const conversations = await synapse.conversations.list()
+const conv = await synapse.conversations.create({
+  type: 'dm',
+  participantIds: ['user_carlos'],
+})
+const { data: messages, cursor } = await synapse.messages.list(conv.id, { limit: 50 })
+
+// Real-time + React hook
+function Chat({ convId }: { convId: string }) {
+  const { messages, send, typing, typingUsers, loadMore, hasMore, loading } =
+    useConversation(synapse, convId)
+
+  if (loading) return <Loading />
+  return (
+    <div>
+      {hasMore && <button onClick={loadMore}>Más</button>}
+      {messages.map(m => <Bubble key={m.id} msg={m} />)}
+      {typingUsers.length > 0 && <Typing />}
+      <Input onSend={send} onType={typing} />
+    </div>
+  )
+}
+```
+
+SDK JS: [github.com/zeacl/synapse-js](https://github.com/zeacl/synapse-js)
+
+### Phoenix / Elixir
+
+```elixir
+# mix.exs
+{:synapse_client, github: "zeacl/synapse_client"}
+```
+
+```elixir
+# Arrancar el cliente (en tu supervision tree)
+{:ok, client} = SynapseClient.start_link(
+  name: MiApp.SynapseClient,
+  token: jwt_from_thalamus,
+  base_url: "http://localhost:4003"
+)
+
+# REST
+{:ok, conversations} = SynapseClient.list_conversations(client)
+{:ok, conv} = SynapseClient.create_conversation(client,
+  type: :dm, participant_ids: ["user_carlos"])
+{:ok, messages, cursor} = SynapseClient.list_messages(client, conv_id, limit: 50)
+
+# Real-time
+SynapseClient.subscribe(client, conv_id)
+SynapseClient.send_message(client, conv_id, "hola @carlos")
+
+receive do
+  {:new_message, msg} -> IO.puts("#{msg.sender_id}: #{msg.content}")
+end
+```
+
+SDK Elixir: [github.com/zeacl/synapse_client](https://github.com/zeacl/synapse_client)
+
 ## API
 
 ### REST (JSON)

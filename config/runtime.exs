@@ -21,6 +21,10 @@ if System.get_env("PHX_SERVER") do
 end
 
 if config_env() == :prod do
+  # Thalamus
+  config :synapse, :thalamus_jwks_url, System.get_env("THALAMUS_JWKS_URL") || "http://thalamus:4000/.well-known/jwks.json"
+  config :synapse, :thalamus_api_url, System.get_env("THALAMUS_API_URL") || "http://thalamus:4000"
+
   database_url =
     System.get_env("DATABASE_URL") ||
       raise """

@@ -2,8 +2,7 @@ defmodule SynapseWeb.Plugs.RequireAuth do
   @moduledoc """
   Validates JWT Bearer token from Authorization header.
 
-  Assigns :user_id, :name, :is_agent to the connection on success.
-  Returns 401 on failure.
+  In test mode, allows bypassing via x-test-user-id header.
   """
 
   import Plug.Conn
@@ -11,6 +10,23 @@ defmodule SynapseWeb.Plugs.RequireAuth do
   def init(opts), do: opts
 
   def call(conn, _opts) do
+    if Mix.env() == :test do
+      case get_req_header(conn, "x-test-user-id") do
+        [user_id | _] ->
+          conn
+          |> assign(:user_id, user_id)
+          |> assign(:name, test_header(conn, "x-test-name") || user_id)
+          |> assign(:is_agent, test_header(conn, "x-test-is-agent") == "true")
+
+        _ ->
+          verify_jwt(conn)
+      end
+    else
+      verify_jwt(conn)
+    end
+  end
+
+  defp verify_jwt(conn) do
     with ["Bearer " <> token] <- get_req_header(conn, "authorization"),
          {:ok, claims} <- Synapse.ThalamusClient.verify_jwt(token) do
       conn
@@ -29,6 +45,13 @@ defmodule SynapseWeb.Plugs.RequireAuth do
         |> put_resp_content_type("application/json")
         |> send_resp(401, Jason.encode!(%{error: "unauthorized"}))
         |> halt()
+    end
+  end
+
+  defp test_header(conn, key) do
+    case get_req_header(conn, key) do
+      [val | _] -> val
+      _ -> nil
     end
   end
 end

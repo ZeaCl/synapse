@@ -134,7 +134,14 @@ defmodule Synapse.Conversation do
   end
 
   defp resolve_mentions(usernames) do
-    Synapse.ThalamusClient.resolve_users(usernames)
+    # Skip Thalamus resolution in test env
+    if Mix.env() == :test do
+      Enum.map(usernames, fn name ->
+        %{id: name, name: name, is_agent: false}
+      end)
+    else
+      Synapse.ThalamusClient.resolve_users(usernames)
+    end
   end
 
   defp add_participant(conv_id, user_id) do

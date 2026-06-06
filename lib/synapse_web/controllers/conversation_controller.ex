@@ -75,9 +75,14 @@ defmodule SynapseWeb.ConversationController do
         |> json(%{data: serialize(conversation)})
 
       {:error, changeset} ->
+        errors = Ecto.Changeset.traverse_errors(changeset, fn {msg, opts} ->
+          Enum.reduce(opts, msg, fn {key, value}, acc ->
+            String.replace(acc, "%{#{key}}", to_string(value))
+          end)
+        end)
         conn
-        |> put_status(:unprocessable_entity)
-        |> json(%{error: "validation_failed", details: changeset.errors})
+        |> put_status(422)
+        |> json(%{error: "validation_failed", details: errors})
     end
   end
 

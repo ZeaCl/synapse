@@ -134,8 +134,8 @@ defmodule Synapse.Conversation do
   end
 
   defp resolve_mentions(usernames) do
-    # Skip Thalamus resolution in test env
-    if Mix.env() == :test do
+    # Skip Thalamus resolution when auth bypass is enabled
+    if Application.get_env(:synapse, :auth_test_bypass, false) do
       Enum.map(usernames, fn name ->
         %{id: name, name: name, is_agent: false}
       end)

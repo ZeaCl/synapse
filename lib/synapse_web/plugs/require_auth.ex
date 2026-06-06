@@ -2,7 +2,7 @@ defmodule SynapseWeb.Plugs.RequireAuth do
   @moduledoc """
   Validates JWT Bearer token from Authorization header.
 
-  In test mode, allows bypassing via x-test-user-id header.
+  In dev/test mode, allows bypassing via x-test-user-id header.
   """
 
   import Plug.Conn
@@ -10,7 +10,7 @@ defmodule SynapseWeb.Plugs.RequireAuth do
   def init(opts), do: opts
 
   def call(conn, _opts) do
-    if Mix.env() == :test do
+    if test_bypass_enabled?() do
       case get_req_header(conn, "x-test-user-id") do
         [user_id | _] ->
           conn
@@ -53,5 +53,9 @@ defmodule SynapseWeb.Plugs.RequireAuth do
       [val | _] -> val
       _ -> nil
     end
+  end
+
+  defp test_bypass_enabled? do
+    Application.get_env(:synapse, :auth_test_bypass, false)
   end
 end

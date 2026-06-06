@@ -25,6 +25,11 @@ if config_env() == :prod do
   config :synapse, :thalamus_jwks_url, System.get_env("THALAMUS_JWKS_URL") || "http://thalamus:4000/.well-known/jwks.json"
   config :synapse, :thalamus_api_url, System.get_env("THALAMUS_API_URL") || "http://thalamus:4000"
 
+  # Enable test auth bypass for local dev (set to "true" in docker-compose for dev, remove for prod)
+  if System.get_env("AUTH_TEST_BYPASS") == "true" do
+    config :synapse, :auth_test_bypass, true
+  end
+
   database_url =
     System.get_env("DATABASE_URL") ||
       raise """

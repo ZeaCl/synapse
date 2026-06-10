@@ -39,11 +39,11 @@ defmodule Synapse.ThalamusClient do
         case Req.get("#{base_url}/api/users?username=#{URI.encode(username)}",
                headers: [{"accept", "application/json"}]) do
           {:ok, %{status: 200, body: %{"data" => [user | _]}}} ->
-            {:ok, %{
+            %{
               id: user["id"],
               name: user["name"],
               is_agent: user["is_agent"] || false
-            }}
+            }
 
           {:ok, %{status: 200, body: %{"data" => []}}} ->
             Logger.warning("[ThalamusClient] User '#{username}' not found")
@@ -57,11 +57,46 @@ defmodule Synapse.ThalamusClient do
       |> Enum.to_list()
 
     results
-    |> Enum.filter(fn {:ok, result} -> result != :not_found and result != :error end)
+    |> Enum.filter(fn
+      {:ok, result} when result != :not_found and result != :error -> true
+      _ -> false
+    end)
     |> Enum.map(fn {:ok, user} -> user end)
   end
 
   def resolve_users(_), do: []
+
+  @doc """
+  Checks which user IDs from a list belong to AI agents.
+  Returns {:ok, agent_ids} or {:error, reason}.
+  """
+  def check_agents(user_ids) when is_list(user_ids) and user_ids != [] do
+    base_url = api_url()
+
+    # Query Thalamus API for each user to check is_agent flag
+    results =
+      Task.async_stream(user_ids, fn uid ->
+        case Req.get("#{base_url}/api/users/#{URI.encode(uid)}",
+               headers: [{"accept", "application/json"}]) do
+          {:ok, %{status: 200, body: %{"data" => user}}} ->
+            if user["is_agent"], do: uid, else: :not_agent
+          _ -> :error
+        end
+      end, timeout: 5_000, on_timeout: :kill_task)
+      |> Enum.to_list()
+
+    agent_ids =
+      results
+      |> Enum.filter(fn
+        {:ok, id} when is_binary(id) -> true
+        _ -> false
+      end)
+      |> Enum.map(fn {:ok, id} -> id end)
+
+    {:ok, agent_ids}
+  end
+
+  def check_agents(_), do: {:ok, []}
 
   # ── Private ──
 

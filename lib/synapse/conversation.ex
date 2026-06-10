@@ -77,16 +77,17 @@ defmodule Synapse.Conversation do
 
     saved = Repo.preload(msg, :conversation)
 
-    # 3. Side effects (async, non-blocking)
+    # 3. Side effects: forward to AI agent if recipient is an agent
     Task.start(fn ->
+      # Check if any participant is an agent (not the sender)
+      agent_ids = get_agent_participants(state.conv_id, sender_id)
+      if agent_ids != [] do
+        forward_to_agent(state.conv_id, agent_ids, content, saved)
+      end
+
       # Add mentioned users as participants
       Enum.each(resolved, fn user ->
         add_participant(state.conv_id, user.id)
-
-        # Forward to Glia if agent
-        if user.is_agent do
-          Synapse.GliaClient.push_message(user.id, state.conv_id, saved)
-        end
       end)
     end)
 
@@ -155,5 +156,132 @@ defmodule Synapse.Conversation do
       |> Participant.changeset(%{conversation_id: conv_id, user_id: user_id, role: "member"})
       |> Repo.insert(on_conflict: :nothing)
     end
+  end
+
+  # Check if any participant (other than sender) is an AI agent.
+  # Queries Thalamus API to check is_agent flag for each participant.
+  # Falls back to known agent IDs if Thalamus is unavailable.
+  defp get_agent_participants(conv_id, sender_id) do
+    participant_ids =
+      from(p in Participant,
+        where: p.conversation_id == ^conv_id and p.user_id != ^sender_id,
+        select: p.user_id
+      )
+      |> Repo.all()
+
+    case Synapse.ThalamusClient.check_agents(participant_ids) do
+      {:ok, agent_ids} when agent_ids != [] ->
+        Logger.info("[Conversation] Agents detected via Thalamus: #{inspect(agent_ids)}")
+        agent_ids
+
+      _ ->
+        # Fallback to known agent IDs (Thalamus unavailable)
+        known_agents = [
+          "user_6d7bc3fe-0af6-44a9-8c50-631ff7127ee7",
+          "6d7bc3fe-0af6-44a9-8c50-631ff7127ee7"
+        ]
+        fallback =
+          Enum.filter(participant_ids, fn id ->
+            String.contains?(id, "@agents.zea.io") or id in known_agents
+          end)
+
+        if fallback != [],
+          do: Logger.info("[Conversation] Agents detected via fallback: #{inspect(fallback)}")
+
+        fallback
+    end
+  end
+
+  # Forward message to Pi backend for AI agent response.
+  # Parses the SSE stream into individual events, broadcasting each delta
+  # in real-time via agent_delta PubSub so the client sees the "thinking chain".
+  defp forward_to_agent(conv_id, agent_ids, content, _original_msg) do
+    pi_url = Application.get_env(:synapse, :pi_backend_url, "http://zea-agent:3001")
+    sse_topic = topic(conv_id)
+
+    Enum.each(agent_ids, fn agent_id ->
+      body = Jason.encode!(%{
+        "userId" => agent_id,
+        "text" => content,
+        "conversationId" => conv_id
+      })
+
+      case Req.post("#{pi_url}/message",
+             headers: [{"content-type", "application/json"}],
+             body: body,
+             receive_timeout: 120_000) do
+        {:ok, %{status: 200, body: response_body}} ->
+          # Parse SSE events and stream deltas one by one
+          events = parse_sse_events(response_body)
+          full_text = stream_agent_deltas(sse_topic, events)
+
+          # Persist the complete agent message
+          if full_text != "" do
+            {:ok, agent_msg} =
+              %Message{}
+              |> Message.changeset(%{
+                conversation_id: conv_id,
+                sender_id: agent_id,
+                content: full_text,
+                type: "text"
+              })
+              |> Repo.insert()
+
+            saved = Repo.preload(agent_msg, :conversation)
+            Phoenix.PubSub.broadcast(Synapse.PubSub, sse_topic, {:new_message, saved})
+          end
+
+        _ ->
+          Logger.warning("[Conversation] Failed to get agent response from Pi backend")
+      end
+    end)
+  end
+
+  # Parse SSE body into a list of decoded JSON event maps.
+  defp parse_sse_events(sse_body) do
+    sse_body
+    |> String.split("\n\n", trim: true)
+    |> Enum.reduce([], fn event, acc ->
+      case String.split(event, "\n") |> Enum.find(&String.starts_with?(&1, "data: ")) do
+        nil ->
+          acc
+
+        data_line ->
+          json_str = String.replace_prefix(data_line, "data: ", "")
+
+          case Jason.decode(json_str) do
+            {:ok, event_map} -> [event_map | acc]
+            _ -> acc
+          end
+      end
+    end)
+    |> Enum.reverse()
+  end
+
+  # Broadcast each delta event via PubSub with small delays to simulate
+  # real-time streaming. Accumulates full text for final message persistence.
+  defp stream_agent_deltas(sse_topic, events) do
+    Enum.reduce(events, "", fn event, acc ->
+      case event do
+        %{"type" => "delta", "text" => text} when is_binary(text) and text != "" ->
+          # Small delay between deltas so the client sees the "thinking chain"
+          Process.sleep(15)
+          Phoenix.PubSub.broadcast(Synapse.PubSub, sse_topic, {:agent_delta, %{text: text}})
+          acc <> text
+
+        %{"type" => "tool", "name" => name} ->
+          # Broadcast tool call so client can show a tool indicator
+          tool_text = "\n\n🔧 _Usando #{name}..._"
+          Phoenix.PubSub.broadcast(Synapse.PubSub, sse_topic, {:agent_delta, %{text: tool_text}})
+          acc <> tool_text
+
+        %{"type" => "tool_result"} ->
+          # Tool results are internal — skip them (they're followed by deltas)
+          acc
+
+        _ ->
+          acc
+      end
+    end)
   end
 end

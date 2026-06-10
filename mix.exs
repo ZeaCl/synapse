@@ -56,6 +56,7 @@ defmodule Synapse.MixProject do
       {:dns_cluster, "~> 0.2.0"},
       {:bandit, "~> 1.5"},
       {:req, "~> 0.5"},
+      {:finch, "~> 0.18"},
       {:joken, "~> 2.6"},
       {:websockex, "~> 0.4.3"},
       {:oban, "~> 2.18"}

@@ -54,6 +54,11 @@ defmodule SynapseWeb.ConversationChannel do
     {:noreply, socket}
   end
 
+  def handle_info({:agent_delta, payload}, socket) do
+    push(socket, "agent_delta", payload)
+    {:noreply, socket}
+  end
+
   def handle_info({:typing_start, user_id}, socket) do
     push(socket, "typing_start", %{user_id: user_id})
     {:noreply, socket}

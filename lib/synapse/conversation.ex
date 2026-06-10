@@ -193,10 +193,11 @@ defmodule Synapse.Conversation do
   end
 
   # Forward message to Pi backend for AI agent response.
-  # Parses the SSE stream into individual events, broadcasting each delta
-  # in real-time via agent_delta PubSub so the client sees the "thinking chain".
+  # Uses Finch streaming to receive SSE events in real-time and broadcast
+  # each delta immediately so the client sees the "thinking chain".
   defp forward_to_agent(conv_id, agent_ids, content, _original_msg) do
     pi_url = Application.get_env(:synapse, :pi_backend_url, "http://zea-agent:3001")
+    Logger.info("[Conversation] Forwarding to Pi: #{pi_url}/message for agents #{inspect(agent_ids)}")
     sse_topic = topic(conv_id)
 
     Enum.each(agent_ids, fn agent_id ->
@@ -206,14 +207,15 @@ defmodule Synapse.Conversation do
         "conversationId" => conv_id
       })
 
-      case Req.post("#{pi_url}/message",
-             headers: [{"content-type", "application/json"}],
-             body: body,
-             receive_timeout: 120_000) do
-        {:ok, %{status: 200, body: response_body}} ->
-          # Parse SSE events and stream deltas one by one
-          events = parse_sse_events(response_body)
-          full_text = stream_agent_deltas(sse_topic, events)
+      # Use Finch directly for streaming HTTP response
+      request = Finch.build(:post, "#{pi_url}/message",
+        [{"content-type", "application/json"}],
+        body)
+
+      case Finch.request(request, Synapse.Finch, receive_timeout: 120_000) do
+        {:ok, %{status: 200, body: body_stream}} ->
+          # Process SSE stream in real-time
+          full_text = process_sse_stream(body_stream, sse_topic)
 
           # Persist the complete agent message
           if full_text != "" do
@@ -232,56 +234,40 @@ defmodule Synapse.Conversation do
           end
 
         _ ->
-          Logger.warning("[Conversation] Failed to get agent response from Pi backend")
+          Logger.warning("[Conversation] Agent response failed for #{agent_id}")
       end
     end)
   end
 
-  # Parse SSE body into a list of decoded JSON event maps.
-  defp parse_sse_events(sse_body) do
-    sse_body
-    |> String.split("\n\n", trim: true)
-    |> Enum.reduce([], fn event, acc ->
-      case String.split(event, "\n") |> Enum.find(&String.starts_with?(&1, "data: ")) do
-        nil ->
-          acc
+  # Process SSE stream from Finch response body.
+  # Broadcasts each delta immediately via PubSub as data arrives.
+  defp process_sse_stream(body_stream, sse_topic) do
+    Enum.reduce(body_stream, {nil, ""}, fn chunk, {buffer_acc, full_text} ->
+      buffer = (buffer_acc || "") <> chunk
+      # Split on double-newline to extract complete SSE events
+      parts = String.split(buffer, "\n\n")
+      # Last part is incomplete — keep as buffer for next chunk
+      {incomplete, complete} = List.pop_at(parts, -1)
 
-        data_line ->
-          json_str = String.replace_prefix(data_line, "data: ", "")
-
-          case Jason.decode(json_str) do
-            {:ok, event_map} -> [event_map | acc]
-            _ -> acc
-          end
-      end
+      Enum.reduce(complete, full_text, fn event, acc ->
+        case String.split(event, "\n") |> Enum.find(&String.starts_with?(&1, "data: ")) do
+          nil -> acc
+          data_line ->
+            json_str = String.replace_prefix(data_line, "data: ", "")
+            case Jason.decode(json_str) do
+              {:ok, %{"type" => "delta", "text" => text}} when is_binary(text) and text != "" ->
+                Phoenix.PubSub.broadcast(Synapse.PubSub, sse_topic, {:agent_delta, %{text: text}})
+                acc <> text
+              {:ok, %{"type" => "tool", "name" => name}} ->
+                tool_text = "\n\n🔧 _Usando #{name}..._"
+                Phoenix.PubSub.broadcast(Synapse.PubSub, sse_topic, {:agent_delta, %{text: tool_text}})
+                acc <> tool_text
+              _ -> acc
+            end
+        end
+      end)
+      |> then(fn new_full -> {incomplete, new_full} end)
     end)
-    |> Enum.reverse()
-  end
-
-  # Broadcast each delta event via PubSub with small delays to simulate
-  # real-time streaming. Accumulates full text for final message persistence.
-  defp stream_agent_deltas(sse_topic, events) do
-    Enum.reduce(events, "", fn event, acc ->
-      case event do
-        %{"type" => "delta", "text" => text} when is_binary(text) and text != "" ->
-          # Small delay between deltas so the client sees the "thinking chain"
-          Process.sleep(15)
-          Phoenix.PubSub.broadcast(Synapse.PubSub, sse_topic, {:agent_delta, %{text: text}})
-          acc <> text
-
-        %{"type" => "tool", "name" => name} ->
-          # Broadcast tool call so client can show a tool indicator
-          tool_text = "\n\n🔧 _Usando #{name}..._"
-          Phoenix.PubSub.broadcast(Synapse.PubSub, sse_topic, {:agent_delta, %{text: tool_text}})
-          acc <> tool_text
-
-        %{"type" => "tool_result"} ->
-          # Tool results are internal — skip them (they're followed by deltas)
-          acc
-
-        _ ->
-          acc
-      end
-    end)
+    |> elem(1)
   end
 end

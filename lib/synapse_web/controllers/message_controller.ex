@@ -56,20 +56,25 @@ defmodule SynapseWeb.MessageController do
   POST /conversations/:conversation_id/messages
 
   Creates a message and broadcasts it via the Conversation GenServer.
+
+  Optional `sender_id` in body allows trusted callers (e.g., Platform)
+  to post messages on behalf of another participant (e.g., agent responses).
   """
   def create(conn, %{"conversation_id" => conv_id} = params) do
-    user_id = conn.assigns.user_id
+    auth_user_id = conn.assigns.user_id
     content = params["content"]
+    sender_id = params["sender_id"] || auth_user_id
 
-    unless participant?(conv_id, user_id) do
+    # Guard: both auth user and sender must be participants
+    unless participant?(conv_id, auth_user_id) and participant?(conv_id, sender_id) do
       conn |> put_status(403) |> json(%{error: "not_participant"})
     else
       # Route through GenServer (handles mentions, Glia forwarding, PubSub)
-      Synapse.Conversation.send_message(conv_id, user_id, content)
+      Synapse.Conversation.send_message(conv_id, sender_id, content)
 
       conn
       |> put_status(:created)
-      |> json(%{status: "sent", conversation_id: conv_id})
+      |> json(%{status: "sent", conversation_id: conv_id, sender_id: sender_id})
     end
   end
 

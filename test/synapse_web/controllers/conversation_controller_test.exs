@@ -86,8 +86,14 @@ defmodule SynapseWeb.ConversationControllerTest do
       conn2 = conn_for("test_user_b")
       post(conn2, "/conversations", %{type: "dm", participant_ids: ["user_c"]})
 
-      conn = get(conn, "/conversations")
-      data = json_response(conn, 200)["data"]
+      auth_conn =
+        build_conn()
+        |> Plug.Conn.put_req_header("accept", "application/json")
+        |> Plug.Conn.put_req_header("x-test-user-id", "test_user_a")
+        |> Plug.Conn.put_req_header("x-test-name", "Test User A")
+
+      conn3 = get(auth_conn, "/conversations")
+      data = json_response(conn3, 200)["data"]
       assert length(data) >= 1
     end
   end
@@ -97,9 +103,16 @@ defmodule SynapseWeb.ConversationControllerTest do
       conn = post(conn, "/conversations", %{type: "dm", participant_ids: ["user_b"]})
       conv = json_response(conn, 201)["data"]
 
-      conn = get(conn, "/conversations/#{conv["id"]}")
-      assert conn.status == 200
-      data = json_response(conn, 200)["data"]
+      # Rebuild conn with auth headers (previous conn was recycled)
+      auth_conn =
+        build_conn()
+        |> Plug.Conn.put_req_header("accept", "application/json")
+        |> Plug.Conn.put_req_header("x-test-user-id", "test_user_a")
+        |> Plug.Conn.put_req_header("x-test-name", "Test User A")
+
+      conn2 = get(auth_conn, "/conversations/#{conv["id"]}")
+      assert conn2.status == 200
+      data = json_response(conn2, 200)["data"]
       assert data["id"] == conv["id"]
     end
 

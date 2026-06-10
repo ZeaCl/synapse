@@ -8,6 +8,7 @@ defmodule Synapse.Application do
   @impl true
   def start(_type, _args) do
     children = [
+      {Finch, name: Synapse.Finch},
       SynapseWeb.Telemetry,
       Synapse.Repo,
       {DNSCluster, query: Application.get_env(:synapse, :dns_cluster_query) || :ignore},

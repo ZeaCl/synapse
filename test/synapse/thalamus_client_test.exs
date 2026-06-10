@@ -18,8 +18,10 @@ defmodule Synapse.ThalamusClientTest do
 
   describe "resolve_users/1" do
     test "resolves a single user", %{bypass: bypass} do
-      Bypass.stub(bypass, fn conn ->
-        Plug.Conn.resp(conn, 200, Jason.encode!(%{
+      Bypass.expect(bypass, fn conn ->
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.resp(200, Jason.encode!(%{
           data: [%{"id" => "user_1", "name" => "Carlos", "is_agent" => false}]
         }))
       end)
@@ -32,9 +34,11 @@ defmodule Synapse.ThalamusClientTest do
     end
 
     test "resolves multiple users in parallel", %{bypass: bypass} do
-      Bypass.stub(bypass, fn conn ->
+      Bypass.expect(bypass, fn conn ->
         username = conn.query_string |> URI.decode_query() |> Map.get("username", "")
-        Plug.Conn.resp(conn, 200, Jason.encode!(%{
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.resp(200, Jason.encode!(%{
           data: [%{"id" => "#{username}_id", "name" => username, "is_agent" => String.contains?(username, "bot")}]
         }))
       end)
@@ -47,8 +51,10 @@ defmodule Synapse.ThalamusClientTest do
     end
 
     test "skips not-found users silently", %{bypass: bypass} do
-      Bypass.stub(bypass, fn conn ->
+      Bypass.expect(bypass, fn conn ->
         username = conn.query_string |> URI.decode_query() |> Map.get("username", "")
+
+        conn = Plug.Conn.put_resp_content_type(conn, "application/json")
 
         if username == "nonexistent" do
           Plug.Conn.resp(conn, 200, Jason.encode!(%{data: []}))

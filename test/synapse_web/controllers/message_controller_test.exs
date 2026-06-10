@@ -6,16 +6,23 @@ defmodule SynapseWeb.MessageControllerTest do
   import Ecto.Query
 
   setup %{conn: conn} do
-    conn =
+    user_conn =
       conn
       |> Plug.Conn.put_req_header("accept", "application/json")
       |> Plug.Conn.put_req_header("x-test-user-id", "test_user_a")
       |> Plug.Conn.put_req_header("x-test-name", "Test User A")
 
-    conn = post(conn, "/conversations", %{type: "dm", participant_ids: ["user_b"]})
+    conn = post(user_conn, "/conversations", %{type: "dm", participant_ids: ["user_b"]})
     conv = json_response(conn, 201)["data"]
 
-    {:ok, conn: conn, conv: conv}
+    # Rebuild conn with auth headers for subsequent requests
+    auth_conn =
+      build_conn()
+      |> Plug.Conn.put_req_header("accept", "application/json")
+      |> Plug.Conn.put_req_header("x-test-user-id", "test_user_a")
+      |> Plug.Conn.put_req_header("x-test-name", "Test User A")
+
+    {:ok, conn: auth_conn, conv: conv}
   end
 
   describe "POST /conversations/:id/messages" do

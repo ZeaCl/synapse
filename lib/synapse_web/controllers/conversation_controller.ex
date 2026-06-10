@@ -58,10 +58,11 @@ defmodule SynapseWeb.ConversationController do
     user_id = conn.assigns.user_id
     type = params["type"] || "dm"
     participant_ids = params["participant_ids"] || []
+    force_new = params["force_new"] == true || params["force_new"] == "true"
 
     # For DM: check if conversation already exists between these two users
     result =
-      if type == "dm" and length(participant_ids) == 1 do
+      if type == "dm" and length(participant_ids) == 1 and not force_new do
         existing = find_existing_dm(user_id, List.first(participant_ids))
         if existing, do: {:ok, existing}, else: do_create(type, params["title"], user_id, participant_ids)
       else
@@ -91,25 +92,28 @@ defmodule SynapseWeb.ConversationController do
 
   defp do_create(type, title, creator_id, participant_ids) do
     Repo.transaction(fn ->
-      {:ok, conv} =
-        %Conversation{}
-        |> Conversation.changeset(%{type: type, title: title, created_by: creator_id})
-        |> Repo.insert()
+      case %Conversation{}
+           |> Conversation.changeset(%{type: type, title: title, created_by: creator_id})
+           |> Repo.insert() do
+        {:ok, conv} ->
+          # Add creator as owner
+          %Participant{}
+          |> Participant.changeset(%{conversation_id: conv.id, user_id: creator_id, role: "owner"})
+          |> Repo.insert!()
 
-      # Add creator as owner
-      %Participant{}
-      |> Participant.changeset(%{conversation_id: conv.id, user_id: creator_id, role: "owner"})
-      |> Repo.insert!()
+          # Add other participants
+          user_ids = if is_list(participant_ids), do: participant_ids, else: []
+          Enum.each(user_ids, fn pid ->
+            %Participant{}
+            |> Participant.changeset(%{conversation_id: conv.id, user_id: pid, role: "member"})
+            |> Repo.insert!(on_conflict: :nothing)
+          end)
 
-      # Add other participants
-      user_ids = if is_list(participant_ids), do: participant_ids, else: []
-      Enum.each(user_ids, fn pid ->
-        %Participant{}
-        |> Participant.changeset(%{conversation_id: conv.id, user_id: pid, role: "member"})
-        |> Repo.insert!(on_conflict: :nothing)
-      end)
+          Repo.preload(conv, [:participants])
 
-      Repo.preload(conv, [:participants])
+        {:error, changeset} ->
+          Repo.rollback(changeset)
+      end
     end)
   end
 
@@ -124,6 +128,8 @@ defmodule SynapseWeb.ConversationController do
     from(c in Conversation,
       join: s in subquery(sub), on: c.id == s.conversation_id,
       where: c.type == "dm",
+      order_by: [desc: c.updated_at],
+      limit: 1,
       preload: [:participants]
     )
     |> Repo.one()
